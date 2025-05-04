@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<title>Mini-Soccer Physics</title>
+<style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#1a1a1a;color:#fff;font-family:sans-serif}
+    #score{position:absolute;top:8px;left:50%;transform:translateX(-50%);font-size:24px}
+    #msg  {position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);font-size:32px}
+    canvas{display:block;margin:0 auto;background:#3c9d23}
+</style>
+</head>
+<body>
+<div id="score">0&nbsp;–&nbsp;0</div>
+<div id="msg"></div>
+<canvas id="field"></canvas>
+
+<script>
+/* -------------------- Konstanter -------------------- */
+const FIELD_W = 800, FIELD_H = 450;
+const GOAL_W  = 10,  GOAL_H = 160;
+const GRAVITY = 980;            // px/s²
+const FPS     = 60, DT = 1/FPS; // fixed time-step
+const MAX_SCORE = 5;
+const IMPULSE  = {x: 140, y: -420}; // kraft per knapptryck
+const GROUND_RESTITUTION = 0.85;   // tidigare ca 0.55
+
+/* -------------------- Verktyg -------------------- */
+function clamp(v,min,max){return v<min?min:v>max?max:v;}
+function dist(ax,ay,bx,by){return Math.hypot(ax-bx, ay-by);}
+function resolveCircleCollision(a, b, restitution = 0.9) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = a.r + b.r;
+    if (dist === 0 || dist >= minDist) return;
+
+    // Normaliserad kollisionsnormal
+    const nx = dx / dist, ny = dy / dist;
+    const overlap = minDist - dist;
+
+    // 1) Separera
+    a.x -= nx * overlap / 2;  a.y -= ny * overlap / 2;
+    b.x += nx * overlap / 2;  b.y += ny * overlap / 2;
+
+    // 2) Impuls (elastisk studs)
+    const relVel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (relVel > 0) return;          // de är redan på väg isär
+    const j = -(1 + restitution) * relVel / 2;   // lika massa (=½ på var)
+
+    a.vx -= j * nx;  a.vy -= j * ny;
+    b.vx += j * nx;  b.vy += j * ny;
+
+    // EXTRA LYFT: ge bollen en uppåtriktad bonus­hastighet
+    // (bara om b är bollen – kolla valfritt på färgen eller instanstyp)
+    if (b instanceof Ball) {
+        const LIFT = 220;               // px/s – justera efter smak
+        b.vy -= LIFT;
+    }
+}
+
+/* -------------------- Spelobjekt -------------------- */
+class Entity{
+    constructor(x,y,r,col){this.x=x;this.y=y;this.r=r;this.vx=0;this.vy=0;this.col=col;}
+    step(){
+        this.vy += GRAVITY*DT;
+        this.x  += this.vx*DT;
+        this.y  += this.vy*DT;
+    }
+    // Ändra i Entity.ground()
+
+    ground() {
+        if (this.y + this.r > FIELD_H) {
+            this.y  = FIELD_H - this.r;
+            this.vy *= -GROUND_RESTITUTION;   // bytte konstant
+        }
+    }
+    walls(){
+        if(this.x-this.r < 0){this.x=this.r; this.vx*=-0.8;}
+        if(this.x+this.r > FIELD_W){this.x=FIELD_W-this.r; this.vx*=-0.8;}
+    }
+    draw(g){
+        g.beginPath();
+        g.arc(this.x,this.y,this.r,0,Math.PI*2);
+        g.fillStyle=this.col; g.fill();
+    }
+}
+class Ball extends Entity{
+    constructor(){super(FIELD_W/2,FIELD_H/2,15,"#ffe66b");}
+}
+class Player extends Entity{
+    constructor(x,col){super(x,FIELD_H-40,25,col);}
+    kick(dir){
+        this.vx += dir*IMPULSE.x;
+        this.vy += IMPULSE.y;
+    }
+}
+
+/* -------------------- Spel-state -------------------- */
+let left  = new Player(FIELD_W*0.25,"#f54c4c");
+let right = new Player(FIELD_W*0.75,"#4c6af5");
+let ball  = new Ball();
+let score = [0,0], freezeTimer=0;
+
+const canvas = document.getElementById("field");
+canvas.width = FIELD_W; canvas.height = FIELD_H;
+const g = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const msgEl   = document.getElementById("msg");
+
+/* -------------------- In- och utdata -------------------- */
+window.addEventListener("keydown",e=>{
+    if(freezeTimer>0) return;              // pausa mellan mål
+    if(e.repeat) return;
+    if(e.key==="w"||e.key==="W")   left.kick(+1);
+    if(e.key==="ArrowUp")          right.kick(-1);
+    if(e.key===" " && isGameOver()) resetMatch();
+});
+
+/* -------------------- Spelloop -------------------- */
+setInterval(update, 1000/FPS);
+
+function update(){
+    if(freezeTimer>0){
+        freezeTimer -= 1000/FPS;
+        if(freezeTimer<=0) newKickoff();
+        render();
+        return;
+    }
+    // Fysik-steg
+    [left,right,ball].forEach(e=>{e.step(); e.ground(); e.walls();});
+    // Spelare ↔ boll krockar
+    [left,right].forEach(p=>resolveCircleCollision(p,ball));
+    // Spelare ↔ spelare (så de inte smälter ihop)
+    resolveCircleCollision(left,right);
+
+    // Mål?
+    const leftGoal  = ball.x - ball.r < GOAL_W  && ball.y > FIELD_H - GOAL_H;
+    const rightGoal = ball.x + ball.r > FIELD_W - GOAL_W && ball.y > FIELD_H - GOAL_H;
+
+    if (leftGoal || rightGoal) {
+        const side = leftGoal ? 1 : 0;   // poäng till mot­stående sida
+        score[side]++;
+        freezeTimer = 1500;
+        msgEl.textContent = ["Mål för RÖD!", "Mål för BLÅ!"][side];
+
+        if (isGameOver())
+            msgEl.textContent = `${side ? "BLÅ" : "RÖD"} vinner! (mellanslag för ny match)`;
+    }
+
+    render();
+}
+function render(){
+    g.clearRect(0,0,FIELD_W,FIELD_H);
+    drawField();
+    [left,right,ball].forEach(e=>e.draw(g));
+    scoreEl.textContent=`${score[0]} – ${score[1]}`;
+}
+function drawField(){
+    // plan och mittlinje
+    g.fillStyle="#3c9d23";
+    g.fillRect(0,0,FIELD_W,FIELD_H);
+    g.strokeStyle="#ffffff66";
+    g.lineWidth=4;
+    g.beginPath();
+    g.moveTo(FIELD_W/2,0); g.lineTo(FIELD_W/2,FIELD_H); g.stroke();
+    // mål
+    g.fillStyle="#ffffff";
+    g.fillRect(0,FIELD_H-GOAL_H,GOAL_W,GOAL_H);
+    g.fillRect(FIELD_W-GOAL_W,FIELD_H-GOAL_H,GOAL_W,GOAL_H);
+}
+function newKickoff(){
+    ball = new Ball();
+    left.x = FIELD_W*0.25; left.y = FIELD_H-40; left.vx=left.vy=0;
+    right.x= FIELD_W*0.75; right.y= FIELD_H-40; right.vx=right.vy=0;
+    msgEl.textContent="";
+}
+function resetMatch(){score=[0,0]; newKickoff();}
+function isGameOver(){return score[0]===MAX_SCORE||score[1]===MAX_SCORE;}
+</script>
+</body>
+</html>
